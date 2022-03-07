@@ -7,47 +7,72 @@
 #pragma comment(lib, "ws2_32.lib")
 
 const uint16_t BUF_SIZE{ 1024 };
+const uint8_t READ{ 3 };
+const uint8_t WRITE{ 5 };
+
 typedef struct
 {
 	SOCKET hClntSock;
-	char buf[BUF_SIZE];
+	SOCKADDR_IN clntAdr;
+} PER_HANDLE_DATA, *LPPER_HANDLE_DATA;
+
+typedef struct
+{
+	OVERLAPPED overlapped;
 	WSABUF wsaBuf;
+	char buffer[BUF_SIZE];
+	int rwMode;
 } PER_IO_DATA, * LPPER_IO_DATA;
 
+DWORD WINAPI EchoThreadMain(LPVOID CompletionProtIO) 
+{
+	HANDLE hComPort = (HANDLE)CompletionProtIO;
+	SOCKET sock;
+	DWORD bytesTrans;
+	LPPER_HANDLE_DATA handleInfo;
+	LPPER_IO_DATA ioInfo;
+	DWORD flags{0};
+
+	while (TRUE)
+	{
+		GetQueuedCompletionStatus(hComPort, &bytesTrans, (LPDWORD)&handleInfo, (LPOVERLAPPED*)&ioInfo, INFINITE);
+		sock = handleInfo->hClntSock;
+
+		if (READ == ioInfo->rwMode)
+		{
+			std::cout << "message received!" << std::endl;
+			if (0 == bytesTrans)
+			{
+				closesocket(sock);
+				free(handleInfo);
+				free(ioInfo);
+				continue;
+			}
+
+			memset(&(ioInfo->overlapped), 0 , sizeof(OVERLAPPED));
+			ioInfo->wsaBuf.len = bytesTrans;
+			ioInfo->rwMode = WRITE;
+			WSASend(sock, &(ioInfo->wsaBuf), 1, NULL, 0 , &(ioInfo->overlapped), NULL);
+
+			ioInfo = (LPPER_IO_DATA)malloc(sizeof(PER_IO_DATA));
+			memset(&(ioInfo->overlapped), 0 , sizeof(OVERLAPPED));
+			ioInfo->wsaBuf.len = BUF_SIZE;
+			ioInfo->wsaBuf.buf = ioInfo->buffer;
+			ioInfo->rwMode = READ;
+			WSARecv(sock, &(ioInfo->wsaBuf), 1, NULL, &flags, &(ioInfo->overlapped), NULL);
+		}
+		else
+		{
+			std::cout << "message sent!" << std::endl;
+			free(ioInfo);
+		}
+	}
+	return 0;
+}
 void ErrorHandling(std::string_view strMsg)
 {
 	std::cerr << strMsg << std::endl;
 	exit(1);
-}
-void CALLBACK WriteCompRoutine(DWORD dwError, DWORD szRecvBytes, LPWSAOVERLAPPED lpOverlapped, DWORD flags);
-void CALLBACK ReadCompRoutine(DWORD dwError, DWORD szRecvBytes, LPWSAOVERLAPPED lpOverlapped, DWORD flags)
-{
-	LPPER_IO_DATA hbInfo = (LPPER_IO_DATA)(lpOverlapped->hEvent);
-	SOCKET hSock = hbInfo->hClntSock;
-	LPWSABUF bufInfo = &(hbInfo->wsaBuf);
-	DWORD sendBytes;
-
-	if (0 == szRecvBytes)
-	{
-		closesocket(hSock);
-		free(lpOverlapped->hEvent);
-		free(lpOverlapped);
-		std::cout << "Client disconncted...." << std::endl;
-	}
-	else
-	{
-		bufInfo->len = szRecvBytes;
-		WSASend(hSock, bufInfo, 1, &sendBytes, 0, lpOverlapped, WriteCompRoutine);
-	}
-}
-void CALLBACK WriteCompRoutine(DWORD dwError, DWORD szRecvBytes, LPWSAOVERLAPPED lpOverlapped, DWORD flags)
-{
-	LPPER_IO_DATA hbInfo = (LPPER_IO_DATA)(lpOverlapped->hEvent);
-	SOCKET hSock = hbInfo->hClntSock;
-	LPWSABUF bufInfo = &(hbInfo->wsaBuf);
-	DWORD recvBytes;
-	DWORD flagInfo = 0;
-	WSARecv(hSock, bufInfo, 1, &recvBytes, &flagInfo, lpOverlapped, ReadCompRoutine);
 }
 
 int main(int argc, char* argv[])
@@ -63,67 +88,51 @@ int main(int argc, char* argv[])
 	{
 		ErrorHandling("WSAStartup() error!");
 	}
+	HANDLE hComPort = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
+	SYSTEM_INFO sysInfo;
+	GetSystemInfo(&sysInfo);
 
-	SOCKET hLisnSock = WSASocket(PF_INET, SOCK_STREAM, 0, NULL, 0, WSA_FLAG_OVERLAPPED);
-	u_long mode = 1;
-	ioctlsocket(hLisnSock, FIONBIO, &mode);
-	if (INVALID_SOCKET == hLisnSock)
+	for (int i = 0; i < sysInfo.dwNumberOfProcessors; i++)
 	{
-		ErrorHandling("socket() error!");
+		CreateThread(NULL, 0, EchoThreadMain, hComPort, 0, NULL);
 	}
-	
+
+	SOCKET hServSock = WSASocket(PF_INET, SOCK_STREAM, 0, NULL, 0, WSA_FLAG_OVERLAPPED);
 	SOCKADDR_IN lisnAdr{ 0 };
 	lisnAdr.sin_family = AF_INET;
 	lisnAdr.sin_addr.s_addr = htonl(INADDR_ANY);
 	lisnAdr.sin_port = htons(atoi(argv[1]));
 
-	if (SOCKET_ERROR == bind(hLisnSock, (SOCKADDR*)&lisnAdr, sizeof(lisnAdr)))
+	if (SOCKET_ERROR == bind(hServSock, (SOCKADDR*)&lisnAdr, sizeof(lisnAdr)))
 	{
 		ErrorHandling("bind() error!");
 	}
 
-	if (SOCKET_ERROR == listen(hLisnSock, 5))
+	if (SOCKET_ERROR == listen(hServSock, 5))
 	{
 		ErrorHandling("listen() error!");
 	}
 
-	SOCKADDR_IN recvAdr;
-	SOCKET hRecvSock;
-	LPWSAOVERLAPPED lpOvLp;
-	LPPER_IO_DATA hbInfo;
-	DWORD flagInfo=0;
-	DWORD recvBytes;
-
-	int recvAdrSz = sizeof(recvAdr);
+	LPPER_HANDLE_DATA handleInfo;
+	LPPER_IO_DATA ioInfo;
+	DWORD recvBytes, flags{0};
 	while (TRUE)
 	{
-		SleepEx(100, TRUE);
-		hRecvSock = accept(hLisnSock, (SOCKADDR*)&recvAdr, &recvAdrSz);
-		if (INVALID_SOCKET == hRecvSock)
-		{
-			if (WSAEWOULDBLOCK == WSAGetLastError())
-			{
-				continue;
-			}
-			else
-			{
-				ErrorHandling("accept() error");
-			}
-		}
-		std::cout << "Client conneted....." << std::endl;
-		lpOvLp = (LPWSAOVERLAPPED)malloc(sizeof(WSAOVERLAPPED));
-		memset(lpOvLp, 0, sizeof(WSAOVERLAPPED));
+		SOCKADDR_IN clntAdr;
+		int addrLen = sizeof(clntAdr);
+		SOCKET hClntSock = accept(hServSock, (SOCKADDR*)&clntAdr, &addrLen);
+		handleInfo = (LPPER_HANDLE_DATA)malloc(sizeof(PER_HANDLE_DATA));
+		handleInfo->hClntSock = hClntSock;
+		memcpy(&(handleInfo->clntAdr), &clntAdr, addrLen);
 
-		hbInfo = (LPPER_IO_DATA)malloc(sizeof(PER_IO_DATA));
-		hbInfo->hClntSock = (DWORD)hRecvSock;
-		hbInfo->wsaBuf.buf = hbInfo->buf;
-		hbInfo->wsaBuf.len = BUF_SIZE;
-
-		lpOvLp->hEvent = (HANDLE)hbInfo;
-		WSARecv(hRecvSock, &(hbInfo->wsaBuf), 1, &recvBytes, &flagInfo, lpOvLp, ReadCompRoutine);
+		CreateIoCompletionPort((HANDLE)hClntSock, hComPort, (DWORD)handleInfo, 0);
+		
+		ioInfo = (LPPER_IO_DATA)malloc(sizeof(PER_IO_DATA));
+		memset(&(ioInfo->overlapped), 0, sizeof(OVERLAPPED));
+		ioInfo->wsaBuf.len = BUF_SIZE;
+		ioInfo->wsaBuf.buf = ioInfo->buffer;
+		ioInfo->rwMode = READ;
+		WSARecv(handleInfo->hClntSock, &(ioInfo->wsaBuf), 1, &recvBytes, &flags, &(ioInfo->overlapped), NULL);
 	}
-	closesocket(hRecvSock);
-	closesocket(hLisnSock);
-	WSACleanup();
 	return 0;
 }
