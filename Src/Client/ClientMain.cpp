@@ -44,8 +44,10 @@ int main(int argc, char* argv[])
 
 	char message[BUF_SIZE];
 	int strLen, readLen;
+	int i = 0;
 	while (TRUE)
 	{
+		/*
 		std::cout << "Input message (Q to quit) : ";
 		fgets(message, BUF_SIZE, stdin);
 		if (!strcmp(message, "q\n") || !strcmp(message, "Q\n"))
@@ -53,6 +55,9 @@ int main(int argc, char* argv[])
 			break;
 		}
 
+		*/		
+		
+		itoa(i++, message, 10);
 		strLen = strlen(message);
 		send(hSocket, message, strLen, 0);
 		readLen = 0;
